@@ -371,7 +371,7 @@ def fetch_file_info(d, fetch_md5):
                     warn('xml parsing error occurred trying to get md5 data for {}'.format(d.name))
 
 
-def filter_downloads(out_list, downloads_list, lang_list, os_list):
+def filter_downloads(out_list, downloads_list, lang_list, os_list, additional_lang_list):
     """filters any downloads information against matching lang and os, translates
     them, and extends them into out_list
     """
@@ -379,13 +379,41 @@ def filter_downloads(out_list, downloads_list, lang_list, os_list):
     downloads_dict = dict(downloads_list)
 
     # hold list of valid languages languages as known by gogapi json stuff
-    valid_langs = []
-    for lang in lang_list:
-        valid_langs.append(LANG_TABLE[lang])
+    valid_langs = [LANG_TABLE[lang] for lang in lang_list]
+    additional_langs = [LANG_TABLE.get(lang) for lang in additional_lang_list]
 
-    # check if lang/os combo passes the specified filter
+    # Add the first matching valid lang to the download queue
+    for lang in valid_langs:
+        if lang not in downloads_dict:
+            continue
+        for os_type in downloads_dict[lang]:
+            if os_type not in os_list:
+                continue
+            for download in downloads_dict[lang][os_type]:
+                # passed the filter, create the entry
+                d = AttrDict(desc=download['name'],
+                             os_type=os_type,
+                             lang=lang,
+                             version=download['version'],
+                             href=GOG_HOME_URL + download['manualUrl'],
+                             md5=None,
+                             name=None,
+                             size=None
+                             )
+                try:
+                    fetch_file_info(d, True)
+                except HTTPError:
+                    warn("failed to fetch %s" % d.href)
+                filtered_downloads.append(d)
+        # Found downloads in the desired language? stop searching for more.
+        if len(filtered_downloads) > 0:
+            break
+        else:
+            continue
+
+    # also add the additional languages to the download queue
     for lang in downloads_dict:
-        if lang in valid_langs:
+        if lang in additional_langs:
             for os_type in downloads_dict[lang]:
                 if os_type in os_list:
                     for download in downloads_dict[lang][os_type]:
@@ -404,7 +432,6 @@ def filter_downloads(out_list, downloads_list, lang_list, os_list):
                         except HTTPError:
                             warn("failed to fetch %s" % d.href)
                         filtered_downloads.append(d)
-
     out_list.extend(filtered_downloads)
 
 
@@ -432,16 +459,16 @@ def filter_extras(out_list, extras_list):
     out_list.extend(filtered_extras)
 
 
-def filter_dlcs(item, dlc_list, lang_list, os_list):
+def filter_dlcs(item, dlc_list, lang_list, os_list, additional_lang_list):
     """filters any downloads/extras information against matching lang and os, translates
     them, and adds them to the item downloads/extras
 
     dlcs can contain dlcs in a recursive fashion, and oddly GOG does do this for some titles.
     """
     for dlc_dict in dlc_list:
-        filter_downloads(item.downloads, dlc_dict['downloads'], lang_list, os_list)
+        filter_downloads(item.downloads, dlc_dict['downloads'], lang_list, os_list, additional_lang_list)
         filter_extras(item.extras, dlc_dict['extras'])
-        filter_dlcs(item, dlc_dict['dlcs'], lang_list, os_list)  # recursive
+        filter_dlcs(item, dlc_dict['dlcs'], lang_list, os_list, additional_lang_list)  # recursive
 
 
 def process_argv(argv):
@@ -501,7 +528,9 @@ def process_argv(argv):
 
     if args.cmd == 'update':
         for lang in args.lang:  # validate the language
-            if lang not in VALID_LANG_TYPES:
+            if lang.startswith("+") and lang[1:] in VALID_LANG_TYPES:
+                pass
+            elif lang not in VALID_LANG_TYPES:
                 error('error: specified language "%s" is not one of the valid languages %s' % (lang, VALID_LANG_TYPES))
                 raise SystemExit(1)
 
@@ -610,6 +639,12 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, id):
     api_url  = GOG_ACCOUNT_URL
     api_url += "/getFilteredProducts"
 
+    additional_lang_list = []
+    for lang in lang_list:
+        if lang.startswith("+"):
+            additional_lang_list.append(lang[1:])
+            lang_list.remove(lang)
+
     # Make convenient list of known ids
     if skipknown:
         for item in gamesdb:
@@ -711,9 +746,9 @@ def cmd_update(os_list, lang_list, skipknown, updateonly, id):
                 item.extras = []
 
                 # parse json data for downloads/extras/dlcs
-                filter_downloads(item.downloads, item_json_data['downloads'], lang_list, os_list)
+                filter_downloads(item.downloads, item_json_data['downloads'], lang_list, os_list, additional_lang_list)
                 filter_extras(item.extras, item_json_data['extras'])
-                filter_dlcs(item, item_json_data['dlcs'], lang_list, os_list)
+                filter_dlcs(item, item_json_data['dlcs'], lang_list, os_list, additional_lang_list)
 
                 # update gamesdb with new item
                 item_idx = item_checkdb(item.id, gamesdb)
